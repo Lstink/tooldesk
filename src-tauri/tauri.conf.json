@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "desktool",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "com.lstink.desktool",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -41,7 +41,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZCNzNDQjE4RTExODdGNkMKUldSc2Z4amhHTXR6KzhYeWZETHNNZExWd2lXd3JBRFIwTFZ3R2lSb1QxZHByM1FrYzdNZmdqMksK",
       "endpoints": [
-        "https://github.com/lstink/desktool/releases/latest/download/latest.json"
+        "https://github.com/Lstink/tooldesk/releases/latest/download/latest.json"
       ]
     }
   }

@@ -26,6 +26,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -37,6 +39,7 @@ jobs:
         with:
           node-version: 20
           cache: "pnpm"
+          cache-dependency-path: "pnpm-lock.yaml"
 
       - name: Install Rust stable (macOS 多架构)
         if: matrix.rustTarget != ''
@@ -48,8 +51,55 @@ jobs:
         if: matrix.rustTarget == ''
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: "${{ matrix.platform }}-${{ matrix.rustTarget }}"
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Resolve release notes
+        id: release_notes
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          NOTES=""
+
+          # 1) Prefer CHANGELOG.md section for current version.
+          if [ -f CHANGELOG.md ]; then
+            CHANGELOG_NOTES="$(awk -v ver="$VERSION" '
+              BEGIN { in_section = 0 }
+              $0 ~ "^## \\[" ver "\\]" { in_section = 1; next }
+              in_section && $0 ~ "^## \\[" { exit }
+              in_section { print }
+            ' CHANGELOG.md)"
+
+            if [ -n "$(printf "%s" "$CHANGELOG_NOTES" | tr -d '[:space:]')" ]; then
+              NOTES="$CHANGELOG_NOTES"
+            fi
+          fi
+
+          # 2) Fallback to tag annotation.
+          if [ -z "$(printf "%s" "$NOTES" | tr -d '[:space:]')" ]; then
+            TAG_NOTES="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)')"
+            if [ -n "$(printf "%s" "$TAG_NOTES" | tr -d '[:space:]')" ]; then
+              NOTES="$TAG_NOTES"
+            fi
+          fi
+
+          # 3) Final fallback.
+          if [ -z "$(printf "%s" "$NOTES" | tr -d '[:space:]')" ]; then
+            NOTES="Automated release for ${TAG}"
+          fi
+
+          {
+            echo "body<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and create release
         uses: tauri-apps/tauri-action@v0
@@ -61,7 +111,7 @@ jobs:
           includeUpdaterJson: true
           tagName: ${{ github.ref_name }}
           releaseName: "Desktool ${{ github.ref_name }}"
-          releaseBody: "Automated release for ${{ github.ref_name }}"
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

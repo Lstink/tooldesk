@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { save, open } from "@tauri-apps/plugin-dialog";
+import { save, open, confirm, message as showDialogMessage } from "@tauri-apps/plugin-dialog";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
@@ -92,7 +92,6 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [appVersion, setAppVersion] = useState("1.0.0");
-  const [updateMessage, setUpdateMessage] = useState("");
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   const canConvert = useMemo(() => images.length > 0 && status !== "converting", [images.length, status]);
@@ -140,21 +139,45 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
   async function handleCheckUpdate(showLatestMessage: boolean) {
     if (isCheckingUpdate) return;
     setIsCheckingUpdate(true);
-    setUpdateMessage("正在检查更新...");
 
     try {
       const update = await check();
       if (!update) {
-        setUpdateMessage(showLatestMessage ? "当前已是最新版本" : "");
+        if (showLatestMessage) {
+          await showDialogMessage("当前已是最新版本", {
+            title: "检查更新",
+            kind: "info",
+          });
+        }
         return;
       }
 
-      setUpdateMessage(`发现新版本 v${update.version}，正在下载并安装...`);
+      const releaseNotes =
+        typeof update.body === "string" && update.body.trim().length > 0
+          ? update.body.trim()
+          : "暂无更新说明";
+
+      const shouldInstall = await confirm(
+        `更新内容：\n${releaseNotes}`,
+        {
+          title: `检测到新版本 v${update.version}`,
+          kind: "info",
+          okLabel: "立即更新",
+          cancelLabel: "稍后",
+        },
+      );
+      if (!shouldInstall) {
+        return;
+      }
+
       await update.downloadAndInstall();
-      setUpdateMessage("更新安装完成，正在重启应用...");
       await relaunch();
     } catch (error) {
-      setUpdateMessage(`检查更新失败：${String(error)}`);
+      const msg = String(error);
+      await showDialogMessage(`检查更新失败：${msg}`, {
+        title: "更新失败",
+        kind: "error",
+      });
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -340,7 +363,6 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
         <button className="btn-primary wide" onClick={openPreviewAndExport} disabled={!canConvert}>
           {status === "converting" ? "转换中..." : "预览并导出 PDF"}
         </button>
-        {updateMessage && <p className="output-path">{updateMessage}</p>}
         {message && <p className={`message ${status}`}>{message}</p>}
       </section>
     </main>

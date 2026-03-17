@@ -61,14 +61,25 @@ pnpm tauri signer generate -w ~/.tauri/desktool.key
 
 git add .
 git commit -m "chore: bump to v1.0.1"
-git tag v1.0.1
+git tag -a v1.0.1 -m "优化更新弹窗与发布流程"
 git push origin main
 git push origin v1.0.1
 ```
 
+如果需要多行更新说明，可用多条 `-m`（第一条是标题，后续是正文）：
+
+```bash
+git tag -a v1.0.1 \
+  -m "v1.0.1" \
+  -m "1) 更新检查发现新版本时直接弹窗" \
+  -m "2) 更新弹窗显示 release notes"
+```
+
+建议同时更新 `CHANGELOG.md` 中对应版本节（如 `## [1.0.1]`）。工作流会优先读取该版本节作为 Release notes；若未找到，再回退到 tag 注释内容。
+
 脚本会同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 中的版本号，避免遗漏。
 
-推送 tag 后，GitHub Actions 会自动构建 macOS / Windows 安装包并创建 Release，同时上传 `latest.json` 和签名文件，供客户端检查更新使用。
+推送 tag 后，GitHub Actions 会自动构建 macOS / Windows 安装包并创建 Release，同时上传 `latest.json` 和签名文件，供客户端检查更新使用。工作流会优先读取 **CHANGELOG.md 对应版本内容** 作为 Release 说明（也会进入更新 notes）；未命中时回退到 **tag 注释内容**。
 
 ### 5. 验证自动更新
 

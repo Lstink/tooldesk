@@ -296,6 +296,17 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.update-message {
+  margin: 0;
+  font-size: 0.9rem;
+  text-align: center;
+  font-weight: 500;
+}
+
+.update-message.muted { color: var(--text-muted); }
+.update-message.success { color: #34c759; }
+.update-message.error { color: var(--danger); }
+
 .option-check {
   display: inline-flex;
   align-items: center;
