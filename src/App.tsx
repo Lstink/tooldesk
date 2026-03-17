@@ -207,6 +207,16 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
     localStorage.setItem('previewData', JSON.stringify({ images: newImages, forceA4 }));
   }
 
+  function clearAllImages() {
+    setImages([]);
+    let forceA4 = false;
+    try {
+      const data = JSON.parse(localStorage.getItem('previewData') || '{}');
+      if (data.forceA4 !== undefined) forceA4 = data.forceA4;
+    } catch(e) {}
+    localStorage.setItem('previewData', JSON.stringify({ images: [], forceA4 }));
+  }
+
   async function openPreviewAndExport() {
     if (images.length === 0 || status === "converting") return;
     
@@ -275,9 +285,16 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
       <section className="card panel">
         <div className="panel-header">
           <h2>1. 添加图片</h2>
-          <button className="btn-primary" onClick={pickImages} disabled={status === "converting"}>
-            添加图片
-          </button>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {images.length > 0 && (
+              <button className="btn-ghost danger" onClick={clearAllImages} disabled={status === "converting"}>
+                清空全部
+              </button>
+            )}
+            <button className="btn-primary" onClick={pickImages} disabled={status === "converting"}>
+              添加图片
+            </button>
+          </div>
         </div>
 
         {images.length === 0 ? (

@@ -14,11 +14,14 @@ jobs:
       matrix:
         include:
           - platform: "macos-latest"
-            args: ""
-          - platform: "ubuntu-22.04"
-            args: ""
+            args: "--target aarch64-apple-darwin"
+            rustTarget: "aarch64-apple-darwin"
+          - platform: "macos-latest"
+            args: "--target x86_64-apple-darwin"
+            rustTarget: "x86_64-apple-darwin"
           - platform: "windows-latest"
             args: ""
+            rustTarget: ""
     runs-on: ${{ matrix.platform }}
 
     steps:
@@ -35,18 +38,15 @@ jobs:
           node-version: 20
           cache: "pnpm"
 
-      - name: Install Rust stable
+      - name: Install Rust stable (macOS 多架构)
+        if: matrix.rustTarget != ''
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rustTarget }}
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
+      - name: Install Rust stable (Windows)
+        if: matrix.rustTarget == ''
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile

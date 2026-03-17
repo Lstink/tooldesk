@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="doc" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5B9BD5"/>
+      <stop offset="100%" style="stop-color:#2E6DB4"/>
+    </linearGradient>
+    <linearGradient id="img" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#E8EEF2"/>
+      <stop offset="100%" style="stop-color:#D0D8E0"/>
+    </linearGradient>
+  </defs>
+  <rect x="152" y="152" width="720" height="720" rx="80" ry="80" fill="url(#doc)"/>
+  <rect x="232" y="232" width="560" height="360" rx="24" ry="24" fill="url(#img)"/>
+  <path d="M332 472 L512 332 L692 472 L692 512 L332 512 Z" fill="#8BA3B8"/>
+  <circle cx="480" cy="380" r="28" fill="#A8B8C8"/>
+  <rect x="232" y="620" width="560" height="80" rx="12" ry="12" fill="rgba(255,255,255,0.35)"/>
+  <rect x="252" y="640" width="120" height="16" rx="4" fill="rgba(255,255,255,0.9)"/>
+  <rect x="392" y="640" width="80" height="16" rx="4" fill="rgba(255,255,255,0.7)"/>
+  <rect x="492" y="640" width="100" height="16" rx="4" fill="rgba(255,255,255,0.7)"/>
+</svg>

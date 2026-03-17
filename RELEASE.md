@@ -68,7 +68,7 @@ git push origin v1.0.1
 
 脚本会同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 中的版本号，避免遗漏。
 
-推送 tag 后，GitHub Actions 会自动构建 macOS / Linux / Windows 安装包并创建 Release，同时上传 `latest.json` 和签名文件，供客户端检查更新使用。
+推送 tag 后，GitHub Actions 会自动构建 macOS / Windows 安装包并创建 Release，同时上传 `latest.json` 和签名文件，供客户端检查更新使用。
 
 ### 5. 验证自动更新
 
