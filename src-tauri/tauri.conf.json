@@ -39,7 +39,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZCNzNDQjE4RTExODdGNkMKUldSc2Z4amhHTXR6KzhYeWZETHNNZExWd2lXd3JBRFIwTFZ3R2lSb1QxZHByM1FrYzdNZmdqMksK",
       "endpoints": [
         "https://github.com/lstink/desktool/releases/latest/download/latest.json"
       ]
