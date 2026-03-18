@@ -19,6 +19,14 @@ pnpm tauri build
 
 构建产物在 `src-tauri/target/release/bundle/` 下（如 `.dmg`、`.msi`、`.deb` 等）。
 
+### Windows 安装注意事项（WebView2）
+
+- 当前 Windows 安装器使用 `embedBootstrapper` 模式，会在安装过程中联网拉取并安装 WebView2 Runtime。
+- 建议在 Win10/11 上以管理员权限运行安装器，确保运行时写入与注册成功。
+- 若安装时报错 `Failed to install WebView2`，先确认网络可访问微软下载源，再重试安装。
+- 若仍失败，可先手动安装 Evergreen WebView2 Runtime，再重新运行应用安装器：  
+  https://developer.microsoft.com/microsoft-edge/webview2/
+
 ---
 
 ## 发布与自动更新

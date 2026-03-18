@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
 # 一键修改项目版本号（同步 package.json、Cargo.toml、tauri.conf.json）
-# 用法: ./scripts/bump-version.sh 1.0.1  或  ./scripts/bump-version.sh v1.0.1
+# 用法:
+#   ./scripts/bump-version.sh -v
+#   ./scripts/bump-version.sh 1.0.1
+#   ./scripts/bump-version.sh v1.0.1
 
 set -e
 cd "$(dirname "$0")/.."
 
+get_current_version() {
+  sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n 1
+}
+
+if [ "$1" = "-v" ]; then
+  CUR_VER="$(get_current_version)"
+  if [ -z "$CUR_VER" ]; then
+    echo "错误: 无法从 package.json 读取当前版本号"
+    exit 1
+  fi
+  echo "$CUR_VER"
+  exit 0
+fi
+
 if [ -z "$1" ]; then
-  echo "用法: $0 <新版本号>"
-  echo "示例: $0 1.0.1  或  $0 v1.0.1"
+  echo "用法: $0 -v | <新版本号>"
+  echo "示例: $0 -v  或  $0 1.0.1  或  $0 v1.0.1"
   exit 1
 fi
 
 VER="${1#v}"   # 去掉开头的 v
-if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "错误: 版本号须为语义化版本，如 1.0.1"
   exit 1
 fi
