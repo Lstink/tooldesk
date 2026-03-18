@@ -198,6 +198,7 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 16px;
+  align-items: start;
 }
 
 .image-tile {
@@ -210,6 +211,7 @@ button:disabled {
   gap: 8px;
   box-shadow: var(--shadow-sm);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
+  align-self: start;
 }
 
 .image-tile:hover {
@@ -235,7 +237,7 @@ button:disabled {
 
 .image-tile-canvas {
   width: 100%;
-  aspect-ratio: 1;
+  height: 140px;
   border-radius: 6px;
   background: #fdfdfd;
   overflow: hidden;
@@ -400,6 +402,7 @@ button:disabled {
 /* 核心画布修改：用 padding 撑开比例，内部绝对定位承载内容 */
 .preview-canvas {
   width: min(400px, 90%);
+  max-width: 400px;
   background: transparent;
   border-radius: 4px;
   overflow: hidden;
@@ -411,6 +414,7 @@ button:disabled {
 
 .preview-canvas.is-a4 {
   aspect-ratio: 1 / 1.414; /* A4比例 */
+  min-height: 420px;
   background: #ffffff;
   padding: 16px;
   box-shadow: 0 2px 12px rgba(0,0,0,0.08), 0 0 1px rgba(0,0,0,0.1);
