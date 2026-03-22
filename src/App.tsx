@@ -20,9 +20,12 @@ type ServerInfo = {
   running: boolean;
   port: number | null;
   shared_dir: string | null;
+  transfer_mode: TransferMode;
   ips: string[];
   urls: string[];
 };
+
+type TransferMode = "upload_only" | "download_only" | "upload_download";
 
 const imageExts = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
 
@@ -487,6 +490,7 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
 function FileTransferPanel() {
   const [sharedDir, setSharedDir] = useState("");
   const [port, setPort] = useState("8787");
+  const [transferMode, setTransferMode] = useState<TransferMode>("upload_download");
   const [isEditingSharedDir, setIsEditingSharedDir] = useState(false);
   const [isEditingPort, setIsEditingPort] = useState(false);
   const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
@@ -507,6 +511,8 @@ function FileTransferPanel() {
     () => !isWorking && sharedDir.trim().length > 0,
     [isWorking, sharedDir],
   );
+  const effectiveMode: TransferMode = serverInfo?.running ? (serverInfo.transfer_mode ?? transferMode) : transferMode;
+  const canDownload = effectiveMode !== "upload_only";
   const urls = serverInfo?.urls ?? [];
   const activeUrl = urls[0] || "";
   const filteredSharedFiles = useMemo(() => {
@@ -547,6 +553,9 @@ function FileTransferPanel() {
       if (info.port) {
         setPort(String(info.port));
       }
+      if (info.transfer_mode) {
+        setTransferMode(info.transfer_mode);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -582,7 +591,7 @@ function FileTransferPanel() {
     setIsWorking(true);
     setError("");
     try {
-      const info = await invoke<ServerInfo>("start_file_server", { sharedDir, port: portNum });
+      const info = await invoke<ServerInfo>("start_file_server", { sharedDir, port: portNum, transferMode });
       setServerInfo(info);
     } catch (e) {
       setError(String(e));
@@ -624,6 +633,10 @@ function FileTransferPanel() {
   }
 
   async function openSharedFilesModal() {
+    if (!canDownload) {
+      setError("当前模式未开启下载");
+      return;
+    }
     const targetSharedDir = (serverInfo?.shared_dir ?? sharedDir).trim();
     if (!targetSharedDir) {
       setError("请先选择共享目录");
@@ -702,6 +715,11 @@ function FileTransferPanel() {
     return () => window.clearInterval(timer);
   }, [showSharedFilesModal]);
 
+  useEffect(() => {
+    if (canDownload) return;
+    setShowSharedFilesModal(false);
+  }, [canDownload]);
+
   return (
     <div className="app-shell app-shell-in-workspace">
       <section className="hero card">
@@ -713,7 +731,13 @@ function FileTransferPanel() {
             aria-label={serverInfo?.running ? "服务已启动" : "服务未启动"}
           />
         </div>
-        <p>同一局域网内访问 `IP:端口`，上传和下载都使用你选择的共享目录（支持 Windows / Linux）。</p>
+        <p>
+          {effectiveMode === "upload_only"
+            ? "同一局域网内访问 `IP:端口`，当前仅支持上传，文件会保存到共享目录（支持 Windows / Linux）。"
+            : effectiveMode === "download_only"
+              ? "同一局域网内访问 `IP:端口`，当前仅支持下载共享目录中的文件（支持 Windows / Linux）。"
+              : "同一局域网内访问 `IP:端口`，当前同时支持上传和下载，文件都使用共享目录（支持 Windows / Linux）。"}
+        </p>
         {serverInfo?.running && activeUrl ? (
           <div className="transfer-hero-actions">
             <a className="transfer-hero-link" href={activeUrl} target="_blank" rel="noreferrer">
@@ -727,6 +751,38 @@ function FileTransferPanel() {
       <section className="card panel transfer-compact-panel">
         <div className="panel-header"><h2>配置与控制台</h2></div>
         <div className="transfer-config-grid">
+          <div className="transfer-field">
+            <label>传输模式</label>
+            <div className="transfer-mode-toggle" role="radiogroup" aria-label="传输模式">
+              <button
+                type="button"
+                className={`transfer-mode-btn ${transferMode === "upload_only" ? "active" : ""}`}
+                onClick={() => setTransferMode("upload_only")}
+                disabled={isWorking || Boolean(serverInfo?.running)}
+                aria-pressed={transferMode === "upload_only"}
+              >
+                仅上传
+              </button>
+              <button
+                type="button"
+                className={`transfer-mode-btn ${transferMode === "download_only" ? "active" : ""}`}
+                onClick={() => setTransferMode("download_only")}
+                disabled={isWorking || Boolean(serverInfo?.running)}
+                aria-pressed={transferMode === "download_only"}
+              >
+                仅下载
+              </button>
+              <button
+                type="button"
+                className={`transfer-mode-btn ${transferMode === "upload_download" ? "active" : ""}`}
+                onClick={() => setTransferMode("upload_download")}
+                disabled={isWorking || Boolean(serverInfo?.running)}
+                aria-pressed={transferMode === "upload_download"}
+              >
+                上传下载
+              </button>
+            </div>
+          </div>
           <div className="transfer-field">
             <label>共享目录（上传和下载都使用这个目录）</label>
             <div className="transfer-inline">
@@ -812,12 +868,20 @@ function FileTransferPanel() {
           >
             {isWorking ? "处理中..." : serverInfo?.running ? "停止服务" : "启动服务"}
           </button>
-          <button className="btn-ghost transfer-shared-btn" onClick={() => void openSharedFilesModal()} disabled={isWorking}>
-            查看共享文件
-          </button>
+          {canDownload ? (
+            <button className="btn-ghost transfer-shared-btn" onClick={() => void openSharedFilesModal()} disabled={isWorking}>
+              查看共享文件
+            </button>
+          ) : null}
         </div>
 
-        <p className="transfer-inline-hint">提示：共享目录里的文件可下载；别人上传的文件也会保存到同一目录。</p>
+        <p className="transfer-inline-hint">
+          {effectiveMode === "upload_only"
+            ? "提示：当前只允许上传到共享目录。"
+            : effectiveMode === "download_only"
+              ? "提示：当前只允许下载共享目录中的文件。"
+              : "提示：共享目录里的文件可下载；别人上传的文件也会保存到同一目录。"}
+        </p>
         {notice && <p className="message success">{notice}</p>}
         {error && <p className="message error">{error}</p>}
       </section>

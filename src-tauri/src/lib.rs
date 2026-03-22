@@ -6,7 +6,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use if_addrs::get_if_addrs;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -17,11 +17,13 @@ use tokio::sync::oneshot;
 #[derive(Clone)]
 struct HttpState {
     shared_dir: PathBuf,
+    transfer_mode: TransferMode,
 }
 
 struct RunningServer {
     port: u16,
     shared_dir: PathBuf,
+    transfer_mode: TransferMode,
     shutdown_tx: oneshot::Sender<()>,
     join: tokio::task::JoinHandle<()>,
 }
@@ -36,8 +38,49 @@ struct ServerInfo {
     running: bool,
     port: Option<u16>,
     shared_dir: Option<String>,
+    transfer_mode: String,
     ips: Vec<String>,
     urls: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TransferMode {
+    UploadOnly,
+    DownloadOnly,
+    UploadDownload,
+}
+
+impl TransferMode {
+    fn can_upload(self) -> bool {
+        matches!(self, TransferMode::UploadOnly | TransferMode::UploadDownload)
+    }
+
+    fn can_download(self) -> bool {
+        matches!(self, TransferMode::DownloadOnly | TransferMode::UploadDownload)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            TransferMode::UploadOnly => "upload_only",
+            TransferMode::DownloadOnly => "download_only",
+            TransferMode::UploadDownload => "upload_download",
+        }
+    }
+
+    fn page_hint(self) -> &'static str {
+        match self {
+            TransferMode::UploadOnly => "当前仅支持上传。支持点击上传和拖拽上传。",
+            TransferMode::DownloadOnly => "当前仅支持下载。可浏览共享目录并下载文件。",
+            TransferMode::UploadDownload => "当前支持上传和下载。上传和下载都使用同一个共享目录。",
+        }
+    }
+}
+
+impl Default for TransferMode {
+    fn default() -> Self {
+        TransferMode::UploadDownload
+    }
 }
 
 #[derive(Serialize)]
@@ -65,8 +108,10 @@ async fn start_file_server(
     state: State<'_, ServerState>,
     shared_dir: String,
     port: Option<u16>,
+    transfer_mode: Option<TransferMode>,
 ) -> Result<ServerInfo, String> {
     let requested_port = port.unwrap_or(8787);
+    let selected_mode = transfer_mode.unwrap_or_default();
     if requested_port == 0 {
         return Err("端口必须在 1-65535 之间".to_string());
     }
@@ -91,6 +136,7 @@ async fn start_file_server(
 
     let app_state = HttpState {
         shared_dir: shared_path.clone(),
+        transfer_mode: selected_mode,
     };
 
     let app = Router::new()
@@ -127,12 +173,13 @@ async fn start_file_server(
         *guard = Some(RunningServer {
             port: actual_port,
             shared_dir: shared_path.clone(),
+            transfer_mode: selected_mode,
             shutdown_tx,
             join,
         });
     }
 
-    Ok(build_server_info(Some((actual_port, shared_path))))
+    Ok(build_server_info(Some((actual_port, shared_path, selected_mode))))
 }
 
 #[tauri::command]
@@ -162,13 +209,13 @@ fn get_file_server_status(state: State<'_, ServerState>) -> Result<ServerInfo, S
         .map_err(|_| "服务状态锁异常".to_string())?;
     let snapshot = guard
         .as_ref()
-        .map(|s| (s.port, s.shared_dir.clone()));
+        .map(|s| (s.port, s.shared_dir.clone(), s.transfer_mode));
     Ok(build_server_info(snapshot))
 }
 
-fn build_server_info(snapshot: Option<(u16, PathBuf)>) -> ServerInfo {
+fn build_server_info(snapshot: Option<(u16, PathBuf, TransferMode)>) -> ServerInfo {
     let ips = get_local_ipv4s();
-    if let Some((port, shared_dir)) = snapshot {
+    if let Some((port, shared_dir, transfer_mode)) = snapshot {
         let urls = ips
             .iter()
             .map(|ip| format!("http://{ip}:{port}"))
@@ -177,6 +224,7 @@ fn build_server_info(snapshot: Option<(u16, PathBuf)>) -> ServerInfo {
             running: true,
             port: Some(port),
             shared_dir: Some(shared_dir.to_string_lossy().to_string()),
+            transfer_mode: transfer_mode.as_str().to_string(),
             ips,
             urls,
         }
@@ -185,6 +233,7 @@ fn build_server_info(snapshot: Option<(u16, PathBuf)>) -> ServerInfo {
             running: false,
             port: None,
             shared_dir: None,
+            transfer_mode: TransferMode::default().as_str().to_string(),
             ips,
             urls: Vec::new(),
         }
@@ -217,9 +266,8 @@ fn get_local_ipv4s() -> Vec<String> {
     ips
 }
 
-async fn index_page() -> Html<&'static str> {
-    Html(
-        r#"<!doctype html>
+async fn index_page(AxumState(state): AxumState<HttpState>) -> Html<String> {
+    let template = r#"<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
@@ -287,6 +335,10 @@ async fn index_page() -> Html<&'static str> {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 14px;
+    }
+
+    .grid.single-mode {
+      grid-template-columns: 1fr;
     }
 
     .card {
@@ -580,11 +632,11 @@ async fn index_page() -> Html<&'static str> {
   <main class="wrap">
     <section class="hero">
       <h1>局域网文件传输</h1>
-      <p>上传和下载都使用同一个共享目录。支持点击上传和拖拽上传。</p>
+      <p>__MODE_HINT__</p>
     </section>
 
-    <section class="grid">
-      <article class="card">
+    <section id="mainGrid" class="grid">
+      <article id="uploadCard" class="card">
         <h2>上传文件</h2>
         <p class="muted">把文件拖到下方区域，或者点击选择文件。</p>
         <div id="uploadDrop" class="upload-drop" role="button" tabindex="0" aria-label="上传区域">
@@ -598,7 +650,7 @@ async fn index_page() -> Html<&'static str> {
         <ul id="uploadQueue" class="upload-queue"></ul>
       </article>
 
-      <article class="card">
+      <article id="downloadCard" class="card">
         <div class="toolbar">
           <h2>下载文件</h2>
           <div class="toolbar-actions">
@@ -617,6 +669,18 @@ async fn index_page() -> Html<&'static str> {
   </main>
 
   <script>
+    const transferMode = "__TRANSFER_MODE__";
+    const canUpload = transferMode !== "download_only";
+    const canDownload = transferMode !== "upload_only";
+    const mainGrid = document.getElementById("mainGrid");
+    const uploadCard = document.getElementById("uploadCard");
+    const downloadCard = document.getElementById("downloadCard");
+    if (!canUpload && uploadCard) uploadCard.style.display = "none";
+    if (!canDownload && downloadCard) downloadCard.style.display = "none";
+    if (mainGrid && (!canUpload || !canDownload)) {
+      mainGrid.classList.add("single-mode");
+    }
+
     const msg = document.getElementById("msg");
     const drop = document.getElementById("uploadDrop");
     const fileInput = document.getElementById("fileInput");
@@ -714,6 +778,7 @@ async fn index_page() -> Html<&'static str> {
     }
 
     async function loadFiles() {
+      if (!canDownload) return;
       try {
         const res = await fetch("/files");
         if (!res.ok) throw new Error("读取列表失败");
@@ -798,6 +863,7 @@ async fn index_page() -> Html<&'static str> {
     }
 
     async function uploadFiles(fileListLike) {
+      if (!canUpload) return;
       const files = Array.from(fileListLike || []);
       if (!files.length || uploading) return;
       uploading = true;
@@ -831,63 +897,72 @@ async fn index_page() -> Html<&'static str> {
     }
 
     function onDropLike(event) {
+      if (!canUpload) return;
       event.preventDefault();
       drop.classList.remove("dragging");
       const files = event.dataTransfer?.files;
       if (files && files.length) uploadFiles(files);
     }
 
-    drop.addEventListener("click", () => fileInput.click());
-    drop.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
+    if (canUpload) {
+      drop.addEventListener("click", () => fileInput.click());
+      drop.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          fileInput.click();
+        }
+      });
+
+      pickBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
         fileInput.click();
-      }
-    });
+      });
 
-    pickBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      fileInput.click();
-    });
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files?.length) {
+          uploadFiles(fileInput.files);
+          fileInput.value = "";
+        }
+      });
 
-    fileInput.addEventListener("change", () => {
-      if (fileInput.files?.length) {
-        uploadFiles(fileInput.files);
-        fileInput.value = "";
-      }
-    });
+      drop.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        drop.classList.add("dragging");
+      });
+      drop.addEventListener("dragenter", (e) => {
+        e.preventDefault();
+        drop.classList.add("dragging");
+      });
+      drop.addEventListener("dragleave", (e) => {
+        if (!drop.contains(e.relatedTarget)) drop.classList.remove("dragging");
+      });
+      drop.addEventListener("drop", onDropLike);
 
-    drop.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      drop.classList.add("dragging");
-    });
-    drop.addEventListener("dragenter", (e) => {
-      e.preventDefault();
-      drop.classList.add("dragging");
-    });
-    drop.addEventListener("dragleave", (e) => {
-      if (!drop.contains(e.relatedTarget)) drop.classList.remove("dragging");
-    });
-    drop.addEventListener("drop", onDropLike);
+      window.addEventListener("dragover", (e) => e.preventDefault());
+      window.addEventListener("drop", (e) => {
+        if (!drop.contains(e.target)) onDropLike(e);
+      });
+    }
 
-    window.addEventListener("dragover", (e) => e.preventDefault());
-    window.addEventListener("drop", (e) => {
-      if (!drop.contains(e.target)) onDropLike(e);
-    });
-
-    searchInput.addEventListener("input", () => {
-      currentQuery = searchInput.value || "";
-      renderFilteredFiles();
-    });
-    sortSelect.addEventListener("change", () => {
-      currentSort = sortSelect.value || "mtime_desc";
-      renderFilteredFiles();
-    });
-    void loadFiles();
-    window.setInterval(() => void loadFiles(), 2000);
+    if (canDownload) {
+      searchInput.addEventListener("input", () => {
+        currentQuery = searchInput.value || "";
+        renderFilteredFiles();
+      });
+      sortSelect.addEventListener("change", () => {
+        currentSort = sortSelect.value || "mtime_desc";
+        renderFilteredFiles();
+      });
+      void loadFiles();
+      window.setInterval(() => void loadFiles(), 2000);
+    }
   </script>
 </body>
-</html>"#,
+</html>"#;
+    Html(
+        template
+            .replace("__TRANSFER_MODE__", state.transfer_mode.as_str())
+            .replace("__MODE_HINT__", state.transfer_mode.page_hint()),
     )
 }
 
@@ -895,6 +970,10 @@ async fn upload_file(
     AxumState(state): AxumState<HttpState>,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResult>, (StatusCode, String)> {
+    if !state.transfer_mode.can_upload() {
+        return Err((StatusCode::FORBIDDEN, "当前模式未开启上传".to_string()));
+    }
+
     let mut saved = 0usize;
 
     while let Some(field) = multipart
@@ -923,6 +1002,10 @@ async fn upload_file(
 }
 
 async fn list_files(AxumState(state): AxumState<HttpState>) -> Result<Json<Vec<SharedFile>>, (StatusCode, String)> {
+    if !state.transfer_mode.can_download() {
+        return Err((StatusCode::FORBIDDEN, "当前模式未开启下载".to_string()));
+    }
+
     let files = collect_shared_files_from_dir(&state.shared_dir)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -1149,6 +1232,10 @@ async fn download_file(
     AxumState(state): AxumState<HttpState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Response, (StatusCode, String)> {
+    if !state.transfer_mode.can_download() {
+        return Err((StatusCode::FORBIDDEN, "当前模式未开启下载".to_string()));
+    }
+
     let safe_name = sanitize_filename(&name)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "无效文件名".to_string()))?;
     if should_hide_from_shared_list(&safe_name) {
