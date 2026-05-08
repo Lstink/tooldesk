@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { save, open, confirm, message as showDialogMessage } from "@tauri-apps/plugin-dialog";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { downloadDir } from "@tauri-apps/api/path";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { exists } from "@tauri-apps/plugin-fs";
 import "./App.css";
 
 type Status = "idle" | "converting" | "success" | "error";
+type ActiveFeature = "pdf" | "transfer" | "junk_file";
+type GenerationState = "idle" | "running" | "success" | "error" | "cancelled";
 
 type ImageItem = {
   id: string;
@@ -27,7 +30,109 @@ type ServerInfo = {
 
 type TransferMode = "upload_only" | "download_only" | "upload_download";
 
+type JunkGenerationStatus = {
+  state: GenerationState;
+  task_id: string | null;
+  written_bytes: number;
+  total_bytes: number;
+  output_path: string | null;
+  error: string | null;
+};
+
+type GenerationStarted = {
+  task_id: string;
+};
+
+type JunkFileSizeUnit = "MB" | "GB" | "TB";
+
 const imageExts = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
+const featureLabels: Record<ActiveFeature, string> = {
+  pdf: "图片转 PDF",
+  transfer: "文件传输",
+  junk_file: "垃圾文件生成",
+};
+
+function WorkspaceShell({
+  sidebar,
+  children,
+}: {
+  sidebar: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <main className="workspace-shell">
+      <aside className="feature-sidebar">{sidebar}</aside>
+      <section className="workspace-content">{children}</section>
+    </main>
+  );
+}
+
+function ToolHero({
+  title,
+  description,
+  status,
+  children,
+}: {
+  title: string;
+  description: string;
+  status?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <section className="hero card tool-hero">
+      <div className="hero-top">
+        <h1>{title}</h1>
+        {status}
+      </div>
+      <p>{description}</p>
+      {children}
+    </section>
+  );
+}
+
+function SectionCard({
+  title,
+  actions,
+  className,
+  children,
+}: {
+  title?: string;
+  actions?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`card panel ${className ?? ""}`.trim()}>
+      {title ? (
+        <div className="panel-header">
+          <h2>{title}</h2>
+          {actions}
+        </div>
+      ) : null}
+      {children}
+    </section>
+  );
+}
+
+function PrimaryActionBar({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return <section className={`card panel primary-action-bar ${className ?? ""}`.trim()}>{children}</section>;
+}
+
+function StatusBadge({
+  tone = "neutral",
+  children,
+}: {
+  tone?: "neutral" | "success" | "danger" | "running";
+  children: ReactNode;
+}) {
+  return <span className={`status-badge tone-${tone}`}>{children}</span>;
+}
 
 export default function App() {
   const [route, setRoute] = useState(window.location.hash);
@@ -99,11 +204,12 @@ export default function App() {
 }
 
 function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: string }) {
-  const [activeFeature, setActiveFeature] = useState<"pdf" | "transfer">("pdf");
+  const [activeFeature, setActiveFeature] = useState<ActiveFeature>("pdf");
   const [images, setImages] = useState<ImageItem[]>([]);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const currentFeatureLabel = featureLabels[activeFeature];
 
   const canConvert = useMemo(() => images.length > 0 && status !== "converting", [images.length, status]);
 
@@ -136,7 +242,12 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
   }, []);
 
   useEffect(() => {
-    const title = activeFeature === "pdf" ? "图片转 PDF" : "文件传输";
+    const title =
+      activeFeature === "pdf"
+        ? "图片转 PDF"
+        : activeFeature === "transfer"
+          ? "文件传输"
+          : "垃圾文件生成";
     document.title = title;
     void getCurrentWebviewWindow().setTitle(title);
   }, [activeFeature]);
@@ -307,8 +418,14 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
   }
 
   return (
-    <main className="workspace-shell">
-      <aside className="feature-sidebar">
+    <WorkspaceShell
+      sidebar={
+        <>
+        <div className="app-brand-block">
+          <p className="app-brand-kicker">Desktool</p>
+          <h2 className="app-brand-title">本地效率工作台</h2>
+          <p className="app-brand-subtitle">当前工具：{currentFeatureLabel}</p>
+        </div>
         <h3 className="feature-title">功能</h3>
         <button
           className={`feature-nav-btn ${activeFeature === "pdf" ? "active" : ""}`}
@@ -328,7 +445,16 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
           </span>
           <span>文件传输</span>
         </button>
-        <section className="card panel global-toolbar sidebar-global-toolbar">
+        <button
+          className={`feature-nav-btn ${activeFeature === "junk_file" ? "active" : ""}`}
+          onClick={() => setActiveFeature("junk_file")}
+        >
+          <span className="feature-nav-icon" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.29 7 12 12l8.71-5"/><path d="M12 22V12"/></svg>
+          </span>
+          <span>垃圾文件生成</span>
+        </button>
+        <SectionCard className="global-toolbar sidebar-global-toolbar">
           <div className="global-toolbar-actions">
             <button className="btn-ghost" onClick={() => void handleCheckUpdate(true)} disabled={isCheckingUpdate}>
               {isCheckingUpdate ? "检查中..." : "检查更新"}
@@ -343,31 +469,22 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
               )}
             </button>
           </div>
-        </section>
-      </aside>
-
-      <section className="workspace-content">
+        </SectionCard>
+        </>
+      }
+    >
         {activeFeature === "pdf" ? (
           <div className="app-shell app-shell-in-workspace">
-            <section className="hero card">
-              <div className="hero-top">
-                <h1>图片转 PDF</h1>
-                <span className="meta-badge">已添加 {images.length} 张</span>
-              </div>
-              <p>选择多张图片，按顺序导出为单个 PDF 文档。</p>
-            </section>
+            <ToolHero
+              title="图片转 PDF"
+              description="按任务流整理图片顺序与旋转，导出为单个 PDF 文档。"
+              status={<StatusBadge tone="running">已添加 {images.length} 张</StatusBadge>}
+            />
 
-            <section className="card panel">
-              <div className="panel-header">
-                <h2>1. 添加图片</h2>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  {images.length > 0 && (
-                    <button className="btn-ghost danger" onClick={clearAllImages} disabled={status === "converting"}>
-                      清空全部
-                    </button>
-                  )}
-                </div>
-              </div>
+            <SectionCard
+              title="输入区"
+              actions={images.length > 0 ? <button className="btn-ghost danger" onClick={clearAllImages} disabled={status === "converting"}>清空全部</button> : null}
+            >
 
               {images.length === 0 ? (
                 <button
@@ -466,24 +583,25 @@ function MainApp({ toggleTheme, theme }: { toggleTheme: () => void, theme: strin
                   </li>
                 </ul>
               )}
-            </section>
+            </SectionCard>
 
-            <section className="card panel">
+            <SectionCard title="结果区">
               <p className="output-path">点击“预览并导出 PDF”后，将在新窗口进行排序、旋转、选择版式和确认导出。</p>
-            </section>
+            </SectionCard>
 
-            <section className="card panel footer-panel">
+            <PrimaryActionBar className="footer-panel">
               <button className="btn-primary wide" onClick={openPreviewAndExport} disabled={!canConvert}>
                 {status === "converting" ? "转换中..." : "预览并导出 PDF"}
               </button>
               {message && <p className={`message ${status}`}>{message}</p>}
-            </section>
+            </PrimaryActionBar>
           </div>
-        ) : (
+        ) : activeFeature === "transfer" ? (
           <FileTransferPanel />
+        ) : (
+          <JunkFilePanel />
         )}
-      </section>
-    </main>
+    </WorkspaceShell>
   );
 }
 
@@ -515,6 +633,12 @@ function FileTransferPanel() {
   const canDownload = effectiveMode !== "upload_only";
   const urls = serverInfo?.urls ?? [];
   const activeUrl = urls[0] || "";
+  const transferDescription =
+    effectiveMode === "upload_only"
+      ? "同一局域网内访问 `IP:端口`，当前仅支持上传，文件会保存到共享目录（支持 Windows / Linux）。"
+      : effectiveMode === "download_only"
+        ? "同一局域网内访问 `IP:端口`，当前仅支持下载共享目录中的文件（支持 Windows / Linux）。"
+        : "同一局域网内访问 `IP:端口`，当前同时支持上传和下载，文件都使用共享目录（支持 Windows / Linux）。";
   const filteredSharedFiles = useMemo(() => {
     const q = sharedFilesQuery.trim().toLowerCase();
     const source = q ? sharedFiles.filter((f) => f.name.toLowerCase().includes(q)) : sharedFiles;
@@ -722,22 +846,11 @@ function FileTransferPanel() {
 
   return (
     <div className="app-shell app-shell-in-workspace">
-      <section className="hero card">
-        <div className="hero-top">
-          <h1>文件传输</h1>
-          <span
-            className={`service-status-dot ${serverInfo?.running ? "is-running" : "is-stopped"}`}
-            title={serverInfo?.running ? "服务已启动" : "服务未启动"}
-            aria-label={serverInfo?.running ? "服务已启动" : "服务未启动"}
-          />
-        </div>
-        <p>
-          {effectiveMode === "upload_only"
-            ? "同一局域网内访问 `IP:端口`，当前仅支持上传，文件会保存到共享目录（支持 Windows / Linux）。"
-            : effectiveMode === "download_only"
-              ? "同一局域网内访问 `IP:端口`，当前仅支持下载共享目录中的文件（支持 Windows / Linux）。"
-              : "同一局域网内访问 `IP:端口`，当前同时支持上传和下载，文件都使用共享目录（支持 Windows / Linux）。"}
-        </p>
+      <ToolHero
+        title="文件传输"
+        description={transferDescription}
+        status={<StatusBadge tone={serverInfo?.running ? "success" : "danger"}>{serverInfo?.running ? "服务运行中" : "服务未启动"}</StatusBadge>}
+      >
         {serverInfo?.running && activeUrl ? (
           <div className="transfer-hero-actions">
             <a className="transfer-hero-link" href={activeUrl} target="_blank" rel="noreferrer">
@@ -746,10 +859,9 @@ function FileTransferPanel() {
             <button className="btn-ghost" onClick={() => void copyUrl(activeUrl)}>复制主地址</button>
           </div>
         ) : null}
-      </section>
+      </ToolHero>
 
-      <section className="card panel transfer-compact-panel">
-        <div className="panel-header"><h2>配置与控制台</h2></div>
+      <SectionCard title="输入区" className="transfer-compact-panel">
         <div className="transfer-config-grid">
           <div className="transfer-field">
             <label>传输模式</label>
@@ -884,15 +996,13 @@ function FileTransferPanel() {
         </p>
         {notice && <p className="message success">{notice}</p>}
         {error && <p className="message error">{error}</p>}
-      </section>
+      </SectionCard>
 
-      <section className="card panel transfer-address-panel">
-        <div className="panel-header">
-          <h2>访问地址</h2>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn-ghost" onClick={() => void copyAllUrls()} disabled={!urls.length}>复制全部</button>
-          </div>
-        </div>
+      <SectionCard
+        title="结果区"
+        className="transfer-address-panel"
+        actions={<button className="btn-ghost" onClick={() => void copyAllUrls()} disabled={!urls.length}>复制全部</button>}
+      >
 
         {serverInfo?.running && urls.length > 0 ? (
           <ul className="transfer-url-list-compact">
@@ -906,7 +1016,10 @@ function FileTransferPanel() {
                   title="复制地址"
                   aria-label="复制地址"
                 >
-                  <span className="transfer-copy-icon-glyph">⧉</span>
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
                 </button>
               </li>
             ))}
@@ -914,7 +1027,7 @@ function FileTransferPanel() {
         ) : (
           <div className="empty-state">启动后会在这里显示可访问地址</div>
         )}
-      </section>
+      </SectionCard>
 
       {showSharedFilesModal && (
         <div className="transfer-modal-backdrop" onClick={() => setShowSharedFilesModal(false)}>
@@ -999,6 +1112,309 @@ function FileTransferPanel() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function JunkFilePanel() {
+  const [outputDir, setOutputDir] = useState("");
+  const [isEditingOutputDir, setIsEditingOutputDir] = useState(false);
+  const [sizeValue, setSizeValue] = useState("1");
+  const [sizeUnit, setSizeUnit] = useState<JunkFileSizeUnit>("GB");
+  const [status, setStatus] = useState<JunkGenerationStatus>({
+    state: "idle",
+    task_id: null,
+    written_bytes: 0,
+    total_bytes: 0,
+    output_path: null,
+    error: null,
+  });
+  const [message, setMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+
+  const isRunning = status.state === "running";
+  const progressPercent = status.total_bytes > 0
+    ? Math.min(100, Math.max(0, (status.written_bytes / status.total_bytes) * 100))
+    : 0;
+
+  useEffect(() => {
+    void refreshGenerationStatus();
+  }, []);
+
+  useEffect(() => {
+    void initDefaultOutputDir();
+  }, []);
+
+  useEffect(() => {
+    if (!isRunning) return;
+    const timer = window.setInterval(() => {
+      void refreshGenerationStatus();
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [isRunning]);
+
+  async function refreshGenerationStatus() {
+    try {
+      const nextStatus = await invoke<JunkGenerationStatus>("get_junk_file_generation_status");
+      setStatus(nextStatus);
+      if (nextStatus.state === "running") {
+        setMessage("正在生成垃圾文件，请稍候...");
+      } else if (nextStatus.state === "success") {
+        setMessage(`生成完成：${basename(nextStatus.output_path ?? "")}`);
+      } else if (nextStatus.state === "cancelled") {
+        setMessage("任务已取消，未完成文件已清理");
+      } else if (nextStatus.state === "error") {
+        setMessage(nextStatus.error ?? "生成失败");
+      } else {
+        setMessage("");
+      }
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function pickOutputPath() {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+    });
+    if (!selected || Array.isArray(selected)) return;
+    setOutputDir(selected);
+  }
+
+  async function initDefaultOutputDir() {
+    try {
+      const dir = await downloadDir();
+      setOutputDir((prev) => prev || dir);
+    } catch {
+      // Ignore: some environments may not resolve download directory.
+    }
+  }
+
+  async function startGeneration() {
+    const trimmedDir = outputDir.trim();
+    if (!trimmedDir) {
+      setMessage("请先选择输出目录");
+      return;
+    }
+
+    const parsedSize = parseSizeToBytes(sizeValue, sizeUnit);
+    if (!parsedSize.ok) {
+      setMessage(parsedSize.error);
+      return;
+    }
+
+    const generatedPath = joinPath(trimmedDir, buildDefaultJunkFilename());
+
+    try {
+      if (await exists(generatedPath)) {
+        const shouldOverwrite = await confirm("目标文件已存在，继续后将覆盖原文件。", {
+          title: "确认覆盖",
+          kind: "warning",
+          okLabel: "覆盖",
+          cancelLabel: "取消",
+        });
+        if (!shouldOverwrite) return;
+      }
+    } catch {
+      // Ignore fs existence check failure and let backend validate on start.
+    }
+
+    setIsSubmitting(true);
+    setMessage("");
+    try {
+      const result = await invoke<GenerationStarted>("start_junk_file_generation", {
+        payload: {
+          outputPath: generatedPath,
+          sizeBytes: parsedSize.value,
+        },
+      });
+      setStatus({
+        state: "running",
+        task_id: result.task_id,
+        written_bytes: 0,
+        total_bytes: parsedSize.value,
+        output_path: generatedPath,
+        error: null,
+      });
+      setMessage("正在生成垃圾文件，请稍候...");
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function cancelGeneration() {
+    setIsCancelling(true);
+    try {
+      await invoke("cancel_junk_file_generation");
+      setMessage("正在取消任务...");
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setIsCancelling(false);
+    }
+  }
+
+  async function openGeneratedFile() {
+    if (!status.output_path) return;
+    try {
+      await invoke("open_local_file", { path: status.output_path });
+    } catch (error) {
+      setMessage(`打开文件失败: ${String(error)}`);
+    }
+  }
+
+  async function openGeneratedFileLocation() {
+    if (!status.output_path) return;
+    try {
+      await invoke("open_file_location", { path: status.output_path });
+    } catch (error) {
+      setMessage(`打开目录失败: ${String(error)}`);
+    }
+  }
+
+  return (
+    <div className="app-shell app-shell-in-workspace">
+      <ToolHero
+        title="垃圾文件生成"
+        description="输入目标目录和文件大小，快速生成真实占用磁盘空间的单文件。"
+        status={
+          <StatusBadge tone={isRunning ? "running" : status.state === "success" ? "success" : status.state === "error" ? "danger" : "neutral"}>
+            {isRunning ? "生成中" : status.state === "success" ? "已完成" : status.state === "cancelled" ? "已取消" : "单文件填充"}
+          </StatusBadge>
+        }
+      />
+
+      <SectionCard title="输入区" className="junk-panel">
+
+        <div className="junk-grid">
+          <div className="junk-field">
+            <label>输出目录</label>
+            <div className="transfer-inline">
+              <div className="transfer-input-wrap">
+                <input
+                  className={`transfer-input junk-path-input ${!isEditingOutputDir ? "is-readonly" : ""}`}
+                  value={outputDir}
+                  onChange={(e) => setOutputDir(e.target.value)}
+                  placeholder="例如：/tmp 或 D:\\Downloads"
+                  readOnly={!isEditingOutputDir}
+                  disabled={isRunning}
+                />
+                <button
+                  type="button"
+                  className="transfer-inline-icon-btn secondary"
+                  title="选择目录"
+                  aria-label="选择目录"
+                  onClick={() => void pickOutputPath()}
+                  disabled={isRunning}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1" />
+                    <path d="M3 10h18l-1.2 8a2 2 0 0 1-2 1.7H6.2a2 2 0 0 1-2-1.7L3 10z" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className={`transfer-inline-icon-btn ${isEditingOutputDir ? "active" : ""}`}
+                  title={isEditingOutputDir ? "完成编辑" : "编辑目录"}
+                  aria-label={isEditingOutputDir ? "完成编辑目录" : "编辑目录"}
+                  onClick={() => setIsEditingOutputDir((prev) => !prev)}
+                  disabled={isRunning}
+                >
+                  {isEditingOutputDir ? (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                      <path d="m12 20 9-9-3-3-9 9-2 5 5-2z" />
+                      <path d="m16 8 3 3" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="junk-field">
+            <label>文件大小</label>
+            <div className="junk-size-row">
+              <input
+                className="transfer-input junk-size-input"
+                value={sizeValue}
+                onChange={(e) => setSizeValue(e.target.value)}
+                inputMode="decimal"
+                placeholder="请输入大小"
+                disabled={isRunning}
+              />
+              <div className="junk-unit-toggle" role="radiogroup" aria-label="文件大小单位">
+                {(["MB", "GB", "TB"] as JunkFileSizeUnit[]).map((unit) => (
+                  <button
+                    key={unit}
+                    type="button"
+                    className={`transfer-mode-btn ${sizeUnit === unit ? "active" : ""}`}
+                    onClick={() => setSizeUnit(unit)}
+                    disabled={isRunning}
+                    aria-pressed={sizeUnit === unit}
+                  >
+                    {unit}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <p className="transfer-inline-hint">首版默认生成真实占用空间的单文件，内容使用高性能重复字节块以提升写入速度。</p>
+
+        <div className="junk-actions">
+          {isRunning ? (
+            <button className="btn-primary transfer-toggle-btn is-stop" onClick={() => void cancelGeneration()} disabled={isCancelling}>
+              {isCancelling ? "取消中..." : "取消生成"}
+            </button>
+          ) : (
+            <button className="btn-primary" onClick={() => void startGeneration()} disabled={isSubmitting}>
+              {isSubmitting ? "启动中..." : "开始生成"}
+            </button>
+          )}
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="状态与结果区"
+        className="junk-status-panel"
+        actions={<StatusBadge tone={status.state === "running" ? "running" : status.state === "success" ? "success" : status.state === "error" ? "danger" : "neutral"}>{formatGenerationState(status.state)}</StatusBadge>}
+      >
+
+        <div className="junk-progress-shell">
+          <div className="junk-progress-head">
+            <span>{formatBytes(status.written_bytes)}</span>
+            <span>{formatBytes(status.total_bytes)}</span>
+          </div>
+          <div className="junk-progress-track" aria-hidden="true">
+            <span className="junk-progress-bar" style={{ width: `${progressPercent}%` }} />
+          </div>
+          <div className="junk-progress-foot">
+            <span>{progressPercent.toFixed(progressPercent >= 10 ? 0 : 1)}%</span>
+            <span>{status.output_path ? basename(status.output_path) : "尚未选择目标文件"}</span>
+          </div>
+        </div>
+
+        {status.output_path ? (
+          <p className="junk-path-note">目标文件：{status.output_path}</p>
+        ) : null}
+        {message ? <p className={`message ${status.state === "error" ? "error" : status.state === "success" ? "success" : "converting"}`}>{message}</p> : null}
+
+        {status.state === "success" && status.output_path ? (
+          <div className="junk-result-actions">
+            <button className="btn-ghost transfer-shared-btn" onClick={() => void openGeneratedFile()}>打开文件</button>
+            <button className="btn-ghost" onClick={() => void openGeneratedFileLocation()}>打开所在目录</button>
+          </div>
+        ) : null}
+      </SectionCard>
     </div>
   );
 }
@@ -1226,6 +1642,56 @@ function formatBytes(bytes: number): string {
   }
   const fixed = value >= 100 || unit === 0 ? 0 : 1;
   return `${value.toFixed(fixed)} ${units[unit]}`;
+}
+
+function parseSizeToBytes(
+  rawValue: string,
+  unit: JunkFileSizeUnit,
+): { ok: true; value: number } | { ok: false; error: string } {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value <= 0) {
+    return { ok: false, error: "文件大小必须是大于 0 的数字" };
+  }
+
+  const multiplier =
+    unit === "MB"
+      ? 1024 ** 2
+      : unit === "GB"
+        ? 1024 ** 3
+        : 1024 ** 4;
+  const sizeBytes = Math.floor(value * multiplier);
+
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+    return { ok: false, error: "文件大小超出支持范围，请输入更小的值" };
+  }
+
+  return { ok: true, value: sizeBytes };
+}
+
+function formatGenerationState(state: GenerationState): string {
+  if (state === "running") return "生成中";
+  if (state === "success") return "已完成";
+  if (state === "error") return "失败";
+  if (state === "cancelled") return "已取消";
+  return "空闲";
+}
+
+function buildDefaultJunkFilename(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  const seconds = String(now.getSeconds()).padStart(2, "0");
+  return `junk-${year}${month}${day}-${hours}${minutes}${seconds}.bin`;
+}
+
+function joinPath(dir: string, filename: string): string {
+  const separator = dir.includes("\\") ? "\\" : "/";
+  return dir.endsWith("/") || dir.endsWith("\\")
+    ? `${dir}${filename}`
+    : `${dir}${separator}${filename}`;
 }
 
 function formatUnixTime(unix: number | null): string {

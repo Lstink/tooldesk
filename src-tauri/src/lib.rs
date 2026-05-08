@@ -7,9 +7,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use if_addrs::get_if_addrs;
 use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tauri::State;
 use tokio::sync::oneshot;
@@ -53,11 +56,17 @@ enum TransferMode {
 
 impl TransferMode {
     fn can_upload(self) -> bool {
-        matches!(self, TransferMode::UploadOnly | TransferMode::UploadDownload)
+        matches!(
+            self,
+            TransferMode::UploadOnly | TransferMode::UploadDownload
+        )
     }
 
     fn can_download(self) -> bool {
-        matches!(self, TransferMode::DownloadOnly | TransferMode::UploadDownload)
+        matches!(
+            self,
+            TransferMode::DownloadOnly | TransferMode::UploadDownload
+        )
     }
 
     fn as_str(self) -> &'static str {
@@ -102,6 +111,56 @@ struct LocalSharedFile {
     modified_unix: Option<u64>,
     path: String,
 }
+
+#[derive(Clone)]
+struct JunkGenerationTaskHandle {
+    cancel_flag: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct JunkGenerationState {
+    inner: Arc<Mutex<GenerationStatus>>,
+    active_task: Arc<Mutex<Option<JunkGenerationTaskHandle>>>,
+    next_id: AtomicU64,
+}
+
+#[derive(Clone, Serialize)]
+struct GenerationStatus {
+    state: String,
+    task_id: Option<String>,
+    written_bytes: u64,
+    total_bytes: u64,
+    output_path: Option<String>,
+    error: Option<String>,
+}
+
+impl Default for GenerationStatus {
+    fn default() -> Self {
+        Self {
+            state: "idle".to_string(),
+            task_id: None,
+            written_bytes: 0,
+            total_bytes: 0,
+            output_path: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JunkFileRequest {
+    output_path: String,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct GenerationStarted {
+    task_id: String,
+}
+
+const JUNK_WRITE_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+const JUNK_WRITE_FILL_BYTE: u8 = 0xAA;
 
 #[tauri::command]
 async fn start_file_server(
@@ -179,7 +238,11 @@ async fn start_file_server(
         });
     }
 
-    Ok(build_server_info(Some((actual_port, shared_path, selected_mode))))
+    Ok(build_server_info(Some((
+        actual_port,
+        shared_path,
+        selected_mode,
+    ))))
 }
 
 #[tauri::command]
@@ -211,6 +274,206 @@ fn get_file_server_status(state: State<'_, ServerState>) -> Result<ServerInfo, S
         .as_ref()
         .map(|s| (s.port, s.shared_dir.clone(), s.transfer_mode));
     Ok(build_server_info(snapshot))
+}
+
+#[tauri::command]
+async fn start_junk_file_generation(
+    state: State<'_, JunkGenerationState>,
+    payload: JunkFileRequest,
+) -> Result<GenerationStarted, String> {
+    validate_junk_file_request(&payload)?;
+
+    let task_id = format!("junk-{}", state.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut active = state
+            .active_task
+            .lock()
+            .map_err(|_| "垃圾文件任务状态锁异常".to_string())?;
+        if active.is_some() {
+            return Err("已有任务正在运行".to_string());
+        }
+        *active = Some(JunkGenerationTaskHandle {
+            cancel_flag: cancel_flag.clone(),
+        });
+    }
+
+    {
+        let mut status = state
+            .inner
+            .lock()
+            .map_err(|_| "垃圾文件任务状态锁异常".to_string())?;
+        *status = GenerationStatus {
+            state: "running".to_string(),
+            task_id: Some(task_id.clone()),
+            written_bytes: 0,
+            total_bytes: payload.size_bytes,
+            output_path: Some(payload.output_path.clone()),
+            error: None,
+        };
+    }
+    let status_state = state.inner.clone();
+    let active_task_state = state.active_task.clone();
+    let request = payload;
+    let running_task_id = task_id.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let outcome = write_junk_file(&request, &cancel_flag);
+
+        if let Ok(mut active) = active_task_state.lock() {
+            *active = None;
+        }
+
+        if let Ok(mut status) = status_state.lock() {
+            *status = match outcome {
+                Ok(written_bytes) => GenerationStatus {
+                    state: "success".to_string(),
+                    task_id: Some(running_task_id),
+                    written_bytes,
+                    total_bytes: request.size_bytes,
+                    output_path: Some(request.output_path.clone()),
+                    error: None,
+                },
+                Err(GenerationOutcome::Cancelled { written_bytes }) => GenerationStatus {
+                    state: "cancelled".to_string(),
+                    task_id: Some(running_task_id),
+                    written_bytes,
+                    total_bytes: request.size_bytes,
+                    output_path: Some(request.output_path.clone()),
+                    error: None,
+                },
+                Err(GenerationOutcome::Failed {
+                    written_bytes,
+                    message,
+                }) => GenerationStatus {
+                    state: "error".to_string(),
+                    task_id: Some(running_task_id),
+                    written_bytes,
+                    total_bytes: request.size_bytes,
+                    output_path: Some(request.output_path.clone()),
+                    error: Some(message),
+                },
+            };
+        }
+    });
+
+    Ok(GenerationStarted { task_id })
+}
+
+#[tauri::command]
+fn get_junk_file_generation_status(
+    state: State<'_, JunkGenerationState>,
+) -> Result<GenerationStatus, String> {
+    let status = state
+        .inner
+        .lock()
+        .map_err(|_| "垃圾文件任务状态锁异常".to_string())?;
+    Ok(status.clone())
+}
+
+#[tauri::command]
+fn cancel_junk_file_generation(state: State<'_, JunkGenerationState>) -> Result<(), String> {
+    let guard = state
+        .active_task
+        .lock()
+        .map_err(|_| "垃圾文件任务状态锁异常".to_string())?;
+
+    if let Some(task) = guard.as_ref() {
+        task.cancel_flag.store(true, Ordering::Relaxed);
+        Ok(())
+    } else {
+        Err("当前没有正在运行的任务".to_string())
+    }
+}
+
+enum GenerationOutcome {
+    Cancelled { written_bytes: u64 },
+    Failed { written_bytes: u64, message: String },
+}
+
+fn validate_junk_file_request(payload: &JunkFileRequest) -> Result<(), String> {
+    if payload.size_bytes == 0 {
+        return Err("文件大小必须大于 0".to_string());
+    }
+
+    let output_path = PathBuf::from(payload.output_path.trim());
+    if output_path.as_os_str().is_empty() {
+        return Err("输出文件路径不能为空".to_string());
+    }
+    if output_path.exists() && output_path.is_dir() {
+        return Err("输出路径不能是文件夹".to_string());
+    }
+
+    let parent = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        return Err("输出目录不存在".to_string());
+    }
+    if !parent.is_dir() {
+        return Err("输出目录不是文件夹".to_string());
+    }
+
+    Ok(())
+}
+
+fn write_junk_file(
+    payload: &JunkFileRequest,
+    cancel_flag: &AtomicBool,
+) -> Result<u64, GenerationOutcome> {
+    let path = PathBuf::from(&payload.output_path);
+    let outcome = (|| {
+        let mut file = File::create(&path).map_err(|e| GenerationOutcome::Failed {
+            written_bytes: 0,
+            message: format!("创建文件失败: {e}"),
+        })?;
+
+        file.set_len(payload.size_bytes)
+            .map_err(|e| GenerationOutcome::Failed {
+                written_bytes: 0,
+                message: format!("预分配文件空间失败: {e}"),
+            })?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| GenerationOutcome::Failed {
+                written_bytes: 0,
+                message: format!("定位文件起始位置失败: {e}"),
+            })?;
+
+        let buffer = vec![JUNK_WRITE_FILL_BYTE; JUNK_WRITE_CHUNK_SIZE];
+        let mut written_bytes = 0_u64;
+
+        while written_bytes < payload.size_bytes {
+            if cancel_flag.load(Ordering::Relaxed) {
+                let _ = file.sync_all();
+                drop(file);
+                return Err(GenerationOutcome::Cancelled { written_bytes });
+            }
+
+            let remaining = payload.size_bytes - written_bytes;
+            let chunk_len = remaining.min(buffer.len() as u64) as usize;
+            file.write_all(&buffer[..chunk_len])
+                .map_err(|e| GenerationOutcome::Failed {
+                    written_bytes,
+                    message: format!("写入文件失败: {e}"),
+                })?;
+            written_bytes += chunk_len as u64;
+        }
+
+        file.sync_all().map_err(|e| GenerationOutcome::Failed {
+            written_bytes,
+            message: format!("落盘失败: {e}"),
+        })?;
+
+        Ok(written_bytes)
+    })();
+
+    if outcome.is_err() {
+        let _ = fs::remove_file(&path);
+    }
+
+    outcome
 }
 
 fn build_server_info(snapshot: Option<(u16, PathBuf, TransferMode)>) -> ServerInfo {
@@ -992,16 +1255,21 @@ async fn upload_file(
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("读取文件内容失败: {e}")))?;
 
         let path = state.shared_dir.join(file_name);
-        tokio::fs::write(path, bytes)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("保存文件失败: {e}")))?;
+        tokio::fs::write(path, bytes).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("保存文件失败: {e}"),
+            )
+        })?;
         saved += 1;
     }
 
     Ok(Json(UploadResult { saved }))
 }
 
-async fn list_files(AxumState(state): AxumState<HttpState>) -> Result<Json<Vec<SharedFile>>, (StatusCode, String)> {
+async fn list_files(
+    AxumState(state): AxumState<HttpState>,
+) -> Result<Json<Vec<SharedFile>>, (StatusCode, String)> {
     if !state.transfer_mode.can_download() {
         return Err((StatusCode::FORBIDDEN, "当前模式未开启下载".to_string()));
     }
@@ -1208,9 +1476,7 @@ fn reveal_file_cross_platform(path: &Path) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        let dir = path
-            .parent()
-            .ok_or_else(|| "无法获取父目录".to_string())?;
+        let dir = path.parent().ok_or_else(|| "无法获取父目录".to_string())?;
         let status = Command::new("xdg-open")
             .arg(dir)
             .status()
@@ -1256,8 +1522,12 @@ async fn download_file(
     );
     resp.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        header::HeaderValue::from_str(&header_value)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("设置下载头失败: {e}")))?,
+        header::HeaderValue::from_str(&header_value).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("设置下载头失败: {e}"),
+            )
+        })?,
     );
 
     Ok(resp)
@@ -1279,6 +1549,7 @@ fn should_hide_from_shared_list(name: &str) -> bool {
 pub fn run() {
     tauri::Builder::default()
         .manage(ServerState::default())
+        .manage(JunkGenerationState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -1289,6 +1560,9 @@ pub fn run() {
             start_file_server,
             stop_file_server,
             get_file_server_status,
+            start_junk_file_generation,
+            get_junk_file_generation_status,
+            cancel_junk_file_generation,
             list_shared_files,
             open_local_file,
             open_file_location
