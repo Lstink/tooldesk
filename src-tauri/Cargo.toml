@@ -1,6 +1,6 @@
 [package]
 name = "desktool"
-version = "1.2.0"
+version = "1.2.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -30,5 +30,5 @@ tauri-plugin-updater = "2.10.0"
 tauri-plugin-process = "2.3.1"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
 if-addrs = "0.13"
-

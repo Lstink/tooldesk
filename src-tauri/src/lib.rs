@@ -2,7 +2,7 @@ mod pdf;
 
 use axum::extract::{Multipart, Path as AxumPath, State as AxumState};
 use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use if_addrs::get_if_addrs;
@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tauri::State;
+use tokio_util::io::ReaderStream;
 use tokio::sync::oneshot;
 
 #[derive(Clone)]
@@ -1509,11 +1510,19 @@ async fn download_file(
     }
     let path = state.shared_dir.join(&safe_name);
 
-    let bytes = tokio::fs::read(&path)
+    let file = tokio::fs::File::open(&path)
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "文件不存在".to_string()))?;
+    let metadata = file.metadata().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("读取文件信息失败: {e}"),
+        )
+    })?;
+    let stream = ReaderStream::new(file);
 
-    let mut resp = (StatusCode::OK, bytes).into_response();
+    let mut resp = Response::new(axum::body::Body::from_stream(stream));
+    *resp.status_mut() = StatusCode::OK;
     let header_value = format!("attachment; filename=\"{}\"", safe_name.replace('"', "_"));
 
     resp.headers_mut().insert(
@@ -1526,6 +1535,15 @@ async fn download_file(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("设置下载头失败: {e}"),
+            )
+        })?,
+    );
+    resp.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from_str(&metadata.len().to_string()).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("设置文件大小失败: {e}"),
             )
         })?,
     );
